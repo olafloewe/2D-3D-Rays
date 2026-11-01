@@ -1,75 +1,117 @@
+using System;
+using System.Collections.Generic;
 using System.Numerics;
-using System.Runtime.CompilerServices;
 using Raylib_cs;
 
 namespace Rays;
 
-internal class Program{
-    public static void Main(string[] args){
-        const int screenWidth = 800;
-        const int screenHeight = 600;
-        const int margin = 12;
-     
-        // initialize window   
-        Raylib.InitWindow(screenWidth, screenHeight, "2D 3D Rays");
+internal static class Program
+{
+    public static void Main(string[] args)
+    {
+        const int screenWidth = 1200;
+        const int screenHeight = 800;
+        const int rayCount = 300;
+        const float fov = 90.0f * (MathF.PI / 180.0f);
+        const float maxRayDist = 1000.0f;
+
+        Raylib.InitWindow(screenWidth, screenHeight, "2D 3D Rays - Ray Casting & Ray Tracing");
         Raylib.SetTargetFPS(120);
 
-        // arena boundaries
-        Vector2 tL = new Vector2(margin, margin);
-        Vector2 tR = new Vector2(screenWidth -margin, margin);
-        Vector2 bL = new Vector2(margin, screenHeight - margin);
-        Vector2 bR = new Vector2(screenWidth - margin, screenHeight - margin); 
+        Rectangle minimapRect = new(16, 16, 320, 240);
+        Rectangle view3DRect = new(0, 0, screenWidth, screenHeight);
 
-        // wall
-        Vector2 w1 = new Vector2(screenWidth * 0.5f, screenHeight * 0.25f); 
-        Vector2 w2 = new Vector2(screenWidth * 0.75f, screenHeight * 0.5f); 
+        (Obstacle[] arenaObstacles, Vector2[] arenaVertices) = GeometryBuilder.BuildArena(minimapRect);
 
-        // player state
-        Vector2 playerPos = new Vector2(screenWidth / 2f, screenHeight / 2f);
-        float playerSpeed = 200.0f;
-        float playerRadius = 10.0f;
+        // Inner purple wall
+        Vector2 w1 = new(minimapRect.X + minimapRect.Width * 0.62f, minimapRect.Y + minimapRect.Height * 0.18f);
+        Vector2 w2 = new(minimapRect.X + minimapRect.Width * 0.85f, minimapRect.Y + minimapRect.Height * 0.48f);
+        Obstacle innerWall = new(w1, w2, Color.Purple, ObstacleGroup.Wall);
+        Vector2[] wallVertices = [w1, w2];
 
-        // main loop
-        while (!Raylib.WindowShouldClose()){
-            // update player movement
+        Vector2 modelCenter = new(minimapRect.X + minimapRect.Width * 0.5f, minimapRect.Y + minimapRect.Height * 0.5f);
+        Player player = new(new Vector2(minimapRect.X + minimapRect.Width * 0.2f, minimapRect.Y + minimapRect.Height * 0.5f));
+        SceneSettings settings = new();
+        SliderUI sliderUI = new();
+
+        List<RayHit>[] rayMultiHits = new List<RayHit>[rayCount];
+        List<(Vector2 Start, Vector2 End)>[] rayBounceLines = new List<(Vector2 Start, Vector2 End)>[rayCount];
+        for (int i = 0; i < rayCount; i++)
+        {
+            rayMultiHits[i] = new List<RayHit>(8);
+            rayBounceLines[i] = new List<(Vector2 Start, Vector2 End)>(4);
+        }
+
+        float halfFovTan = MathF.Tan(fov * 0.5f);
+
+        while (!Raylib.WindowShouldClose())
+        {
             float dt = Raylib.GetFrameTime();
-            Vector2 moveDir = Vector2.Zero;
 
-            // key inputs
-            if (Raylib.IsKeyDown(KeyboardKey.W)) moveDir.Y -= 1;
-            if (Raylib.IsKeyDown(KeyboardKey.S)) moveDir.Y += 1;
-            if (Raylib.IsKeyDown(KeyboardKey.A)) moveDir.X -= 1;
-            if (Raylib.IsKeyDown(KeyboardKey.D)) moveDir.X += 1;
+            // 1. Update player & scene state
+            player.Update(dt, minimapRect);
+            settings.ModelRotationDeg = (settings.ModelRotationDeg + settings.ModelSpinSpeed * dt) % 360.0f;
 
-            // move if needed
-            if (moveDir != Vector2.Zero){
-                moveDir = Vector2.Normalize(moveDir);
-                // take "step"
-                playerPos += moveDir * playerSpeed * dt;
+            // 2. Build dynamic models (central star & player hull)
+            (Obstacle[] modelObstacles, Vector2[] modelVertices) = GeometryBuilder.BuildStarModel(
+                modelCenter,
+                outerRadius: settings.ModelScale,
+                innerRadius: settings.ModelScale * 0.45f,
+                points: 5,
+                rotationRad: settings.ModelRotationDeg * (MathF.PI / 180.0f));
+
+            (Obstacle[] playerObstacles, Vector2[] playerVertices) = GeometryBuilder.BuildPlayerModel(
+                player.Position,
+                player.Angle);
+
+            Obstacle[] allObstacles = [.. arenaObstacles, innerWall, .. modelObstacles, .. playerObstacles];
+
+            // 3. Cast & trace all rays across the camera plane
+            for (int i = 0; i < rayCount; i++)
+            {
+                float cameraX = (2.0f * i / (rayCount - 1)) - 1.0f;
+                float angleOffset = MathF.Atan(cameraX * halfFovTan);
+                float rayAngle = player.Angle + angleOffset;
+
+                RayTracer.CastAndTraceRay(
+                    player.Position,
+                    rayAngle,
+                    angleOffset,
+                    maxRayDist,
+                    allObstacles,
+                    settings,
+                    rayMultiHits[i],
+                    rayBounceLines[i]);
             }
 
-            // clamp player inside the arena boundaries
-            playerPos.X = Math.Clamp(playerPos.X, margin + playerRadius, screenWidth - margin - playerRadius);
-            playerPos.Y = Math.Clamp(playerPos.Y, margin + playerRadius, screenHeight - margin - playerRadius);
-
+            // 4. Render 3D scene, 2D minimap, and UI sliders
             Raylib.BeginDrawing();
-            Raylib.ClearBackground(Color.RayWhite);
+            Raylib.ClearBackground(Color.Black);
 
-            // Raylib.DrawText("Hello, Raylib!", margin, margin, 20, Color.Black);
-            Raylib.DrawFPS(screenWidth - 90, margin);
+            Renderer3D.Draw3DView(view3DRect, rayMultiHits, settings);
 
-            // draw "arena"
-            Raylib.DrawLineEx(tL,bL, 4.0f,Color.Red);
-            Raylib.DrawLineEx(tL,tR, 4.0f,Color.Red);
-            Raylib.DrawLineEx(tR,bR, 4.0f,Color.Red);
-            Raylib.DrawLineEx(bL,bR, 4.0f,Color.Red);
+            MinimapRenderer.Draw(
+                minimapRect,
+                player,
+                player.Angle - fov * 0.5f,
+                fov,
+                maxRayDist,
+                arenaObstacles,
+                innerWall,
+                modelObstacles,
+                playerObstacles,
+                allObstacles,
+                arenaVertices,
+                wallVertices,
+                modelVertices,
+                playerVertices,
+                rayMultiHits,
+                rayBounceLines,
+                settings);
 
-            // draw wall
-            Raylib.DrawLineEx(w1,w2, 5.0f,Color.Purple);
+            sliderUI.UpdateAndDraw(minimapRect, settings);
 
-            // draw "player"
-            Raylib.DrawCircleV(playerPos, playerRadius, Color.Green);
-
+            Raylib.DrawFPS(screenWidth - 90, 12);
             Raylib.EndDrawing();
         }
 
